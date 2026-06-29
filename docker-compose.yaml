@@ -1,0 +1,14 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17 # plain postgres + pgvector preinstalled
+    container_name: coldchain-db
+    environment:
+      POSTGRES_USER: ops
+      POSTGRES_PASSWORD: ops
+      POSTGRES_DB: coldchain
+    ports:
+      - "5433:5432" # 5433 on host to avoid clashing w/ other PG
+    volumes:
+      - coldchain_pgdata:/var/lib/postgresql/data
+volumes:
+  coldchain_pgdata:

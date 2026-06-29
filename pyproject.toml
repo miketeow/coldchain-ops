@@ -1,0 +1,18 @@
+[project]
+name = "coldchain-ops"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.14"
+dependencies = [
+    "faker>=40.23.0",
+    "openpyxl>=3.1.5",
+    "pandas>=3.0.4",
+    "psycopg[binary]>=3.3.4",
+    "python-dotenv>=1.2.2",
+    "sqlalchemy>=2.0.51",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.20",
+]
