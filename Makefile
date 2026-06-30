@@ -24,7 +24,13 @@ db-create:
 	goose -dir migrations create $(name) sql
 
 psql:
-	psql "$(DATABASE_URL_PLAIN)"
+	psql "$(DATABASE_URL_PLAIN)" $(ARGS)
 
 probe:
 	psql "$(DATABASE_URL_PLAIN)" -f scripts/probe.sql
+
+seed:
+	psql "$(DATABASE_URL_PLAIN)" -c "TRUNCATE order_lines, orders, deliveries, storage_costs, dates, customers, products, suppliers RESTART IDENTITY CASCADE;"
+	uv run python src/seed_dimensions.py
+	uv run python src/generate_date_dim.py
+	uv run python src/generate_messy_orders.py
