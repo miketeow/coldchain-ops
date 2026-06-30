@@ -1,2 +1,6 @@
 .env
 scripts/probe.sql
+__pycache__/
+*.pyc
+.venv/
+data/*.xlsx
