@@ -1,5 +1,6 @@
 .env
 scripts/probe.sql
+scripts/probe_phase2.sql
 __pycache__/
 *.pyc
 .venv/

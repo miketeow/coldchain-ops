@@ -24,7 +24,7 @@ order_customer = rng.choice(cust.customer_id, size=N_ORDERS, p=cust_weights)
 
 # weekend-light order dates
 day_arr = np.array(days)
-is_weekend = pd.to_datetime(days).dt.dayofweek.values >= 5
+is_weekend = pd.to_datetime(days).dt.dayofweek.to_numpy() >= 5
 day_weights = np.where(is_weekend, 0.4, 1.0)
 day_weights = day_weights / day_weights.sum()
 order_dates = rng.choice(day_arr, size=N_ORDERS, p=day_weights)
