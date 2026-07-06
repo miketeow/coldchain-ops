@@ -34,3 +34,10 @@ seed:
 	uv run python src/seed_dimensions.py
 	uv run python src/generate_date_dim.py
 	uv run python src/generate_messy_orders.py
+
+reset-facts:
+	psql "$(DATABASE_URL_PLAIN)" -c "TRUNCATE order_lines, orders, deliveries, storage_costs RESTART IDENTITY CASCADE;"
+
+etl: reset-facts
+	uv run python src/etl_orders.py
+	uv run python src/generate_logistics.py

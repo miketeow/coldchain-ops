@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 .venv/
 data/*.xlsx
+data/rejects_orders.csv
+logs/
