@@ -47,8 +47,21 @@ I tell you a phase is done, update the box here (only when I say so).
         Central 8.2 / South 12.4).
       - `v_storage_cost`: 4,065 rows, total `daily_cost` 298,337.40 — matches raw
         computation.
-- [ ] **Phase 6 — pgvector / LLM intelligence layer** (6a semantic search OR 6b
-      WhatsApp→structured-order, do one well). ← NEXT
+- [x] **Phase 5 — Semantic product search (pgvector).** VERIFIED:
+      - Goose migration enables the `vector` extension and adds `products.embedding
+        vector(384)`.
+      - `src/generate_product_embeddings.py`: embeds `product_name`/`category`/`brand`
+        per product via `sentence-transformers` (`all-MiniLM-L6-v2`), writes back through
+        raw `psycopg` + `pgvector.psycopg.register_vector` (8/8 products embedded).
+      - `src/search_products.py`: embeds a free-text query with the same model, ranks
+        products by cosine distance (`<=>`). Query `"citrus fruit"` ranks Navel Orange
+        (0.2471) and Valencia Orange (0.2739) top — despite "citrus" never appearing
+        literally in the data. Query `"red grapes"` ranks Red Grapes first (0.2837),
+        clearly separated from the next-closest (0.52) — confirms both semantic recall
+        (no lexical overlap needed) and exact-phrase precision.
+- [ ] **Phase 6 — WhatsApp → structured order (LLM extraction)**, reusing Phase 5's
+      embed-and-compare mechanism to fuzzy-match free-text product mentions to real
+      `product_id`s. ← NEXT
 
 ## Key carried-forward facts for Phase 3
 - The xlsx's `order_id` is an **in-memory link only**, NOT the database's IDENTITY id.
