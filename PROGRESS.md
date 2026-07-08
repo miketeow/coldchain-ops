@@ -35,12 +35,20 @@ I tell you a phase is done, update the box here (only when I say so).
       - `make etl` idempotent (`reset-facts` → `etl_orders` → `generate_logistics`);
         logging to `logs/etl.log` with `LOG_LEVEL` control; rejects to
         `data/rejects_orders.csv`.
-- [ ] **Phase 4 — SQL analytics views** (`v_sales_margin`, `v_delivery_performance`,
-      `v_storage_cost`) + CSV export for the Tableau Public path. ← NEXT
-- [ ] **Phase 5 — Tableau dashboards** (Mac-native; Tableau↔Power BI mapping is an
-      interview asset).
+- [x] **Phase 4 — SQL analytics views.** VERIFIED:
+      - Goose migration `20260708100538_add_analytics_views.sql` creates
+        `v_sales_margin`, `v_delivery_performance`, `v_storage_cost` (plain views, all
+        joins inner, safe per Phase 3's 0-orphan/0-missing-date checks).
+      - `v_sales_margin`: 12,117 rows, revenue 19,832,819.59, margin 6,031,937.59 —
+        matches raw `order_lines` totals exactly.
+      - `v_delivery_performance`: 4,964 rows; on-time defined as delivered within a
+        2-hour grace window of ETA (naive `delivered_at <= planned_eta` gives a false
+        0.0%); avg delay 1.81h, on-time 66.1%, breach rate 5.8% overall (North 4.0 /
+        Central 8.2 / South 12.4).
+      - `v_storage_cost`: 4,065 rows, total `daily_cost` 298,337.40 — matches raw
+        computation.
 - [ ] **Phase 6 — pgvector / LLM intelligence layer** (6a semantic search OR 6b
-      WhatsApp→structured-order, do one well).
+      WhatsApp→structured-order, do one well). ← NEXT
 
 ## Key carried-forward facts for Phase 3
 - The xlsx's `order_id` is an **in-memory link only**, NOT the database's IDENTITY id.

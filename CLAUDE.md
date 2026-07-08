@@ -1,17 +1,19 @@
 # CLAUDE.md — coldchain-ops
 
 ## What this project is
-A synthetic fresh-fruit cold-chain distribution platform, built as interview
-preparation for a Senior AI Engineer / digitalisation role. It deliberately mirrors a
-real fruit importer's business: imported fruit, cold storage, supermarket deliveries,
-WhatsApp orders, and a messy accounting-system Excel export. The arc is: model it
-(schema) → populate it (synthetic data) → clean it (ETL) → report on it (BI) → layer
-intelligence on it (pgvector/LLM).
+A synthetic fresh-fruit cold-chain distribution platform, built as a general-purpose
+AI/data-engineering portfolio piece (not tied to one specific job posting — see
+PROGRESS.md history). It deliberately mirrors a real fruit importer's business: imported
+fruit, cold storage, supermarket deliveries, WhatsApp orders, and a messy
+accounting-system Excel export. The arc is: model it (schema) → populate it (synthetic
+data) → clean it (ETL) → layer intelligence on it (pgvector/LLM). There is deliberately
+no BI/dashboard phase — see PROGRESS.md for why that was cut.
 
-The agreed spec is in the repo — read these before doing anything:
-- `coldchains-ops_spec` — the full six-phase plan and curriculum.
-- `phase_1_schema_walkthrough` — the worked Phase 1 doc; the *style* to match.
-- `PROGRESS.md` — current status and the phase checklist. Check this first.
+Read before doing anything:
+- `PROGRESS.md` — current status, phase checklist, and the reasoning behind the pivot
+  away from the original job-specific plan. Check this first.
+- `phase_3_walkthrough.md` / `phase_4_walkthrough.md` — worked docs for the phases done
+  so far; the *style* to match for any new walkthrough.
 
 ## THE MOST IMPORTANT RULE: this is a learning project, not a build-it-for-me project
 
