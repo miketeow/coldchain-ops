@@ -1,18 +1,17 @@
 import os
 import re
 import sys
-from typing import LiteralString, cast
+from typing import Any, LiteralString, cast
 
 import psycopg
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from google.genai import errors
 from pydantic import BaseModel
 
 load_dotenv()
 
-PLACEHOLDER_KEY = "placeholder-not-a-real-key"
-FIXTURES_PATH = "fixtures/nl_to_sql_fixtures.json"
 MODEL_NAME = "gemini-2.5-flash-lite"
 
 VIEW_SCHEMA = """
@@ -68,8 +67,14 @@ Rules:
 - Two sentences at most. Plain language, no markdown.
 """
 
+client = genai.Client(
+    api_key=os.environ["GEMINI_API_KEY"],
+    http_options=types.HttpOptions(
+        retry_options=types.HttpRetryOptions(attempts=5),
+    ),
+)
+
 def get_sql(question: str) -> str:
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     response = client.models.generate_content(
         model=MODEL_NAME,
         contents=question,
@@ -97,20 +102,23 @@ def validate_sql(sql: str) -> None:
     if FORBIDDEN.search(sql):
         raise ValueError(f"query contains a disallowed keyword: {sql}")
 
-def narrate(question: str, colnames: list[str], rows: list[tuple]) -> str:
+def narrate(question: str, colnames: list[str], rows: list[tuple[Any, ...]]) -> str | None:
     table = " | ".join(colnames) + "\n"
     table += "\n".join(" | ".join(str(v) for v in row) for row in rows)
 
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    response = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=f"Question: {question}\n\nQuery result:\n{table}",
-        config=types.GenerateContentConfig(
-            system_instruction=NARRATOR_PROMPT,
-            response_mime_type="application/json",
-            response_schema=Narration,
-        ),
-    )
+    try:
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=f"Question: {question}\n\nQuery result:\n{table}",
+            config=types.GenerateContentConfig(
+                system_instruction=NARRATOR_PROMPT,
+                response_mime_type="application/json",
+                response_schema=Narration,
+            ),
+        )
+    except errors.APIError as e:
+        print(f"[narration unavailable: {e.code} {e.status}]", file=sys.stderr)
+        return None
     parsed = response.parsed
     if not isinstance(parsed, Narration):
         raise RuntimeError(f"Gemini did not return the expected schema: {parsed!r}")
@@ -133,9 +141,11 @@ def main():
         colnames = [desc.name for desc in cur.description]
         rows = cur.fetchall()
 
+    narration = narrate(question, colnames, rows)
     print(f"\nSQL: {sql}\n")
-    print(narrate(question, colnames, rows))
-    print()
+    if narration:
+        print(narration)
+        print()
     print(colnames)
     for row in rows:
         print(row)
