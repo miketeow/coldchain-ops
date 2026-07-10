@@ -154,20 +154,25 @@ def narrate(question: str, colnames: list[str], rows: list[tuple[Any, ...]]) -> 
         raise RuntimeError(f"Gemini did not return the expected schema: {parsed!r}")
     return parsed.answer
 
+def answer_question(
+    conn: psycopg.Connection, question: str
+) -> tuple[str, list[str], list[tuple]]:
+    system_prompt = SYSTEM_PROMPT + "\n" + load_enums(conn)
+    query = get_sql(question, system_prompt)
+    validate_sql(query)
+    with conn.cursor() as cur:
+        cur.execute(cast(LiteralString, query))
+        assert cur.description is not None
+        colnames = [desc.name for desc in cur.description]
+        rows = cur.fetchall()
+    return query, colnames, rows
+
 def main():
     question = sys.argv[1]
 
     conn = psycopg.connect(os.environ["DATABASE_URL_LLM_PLAIN"])
     with conn:
-        system_prompt = SYSTEM_PROMPT + "\n" + load_enums(conn)
-        query = get_sql(question, system_prompt)
-        validate_sql(query)
-
-        with conn.cursor() as cur:
-            cur.execute(cast(LiteralString, query))
-            assert cur.description is not None
-            colnames = [desc.name for desc in cur.description]
-            rows = cur.fetchall()
+        query, colnames, rows = answer_question(conn, question)
 
     narration = narrate(question, colnames, rows)
     print(f"\nSQL: {query}\n")
