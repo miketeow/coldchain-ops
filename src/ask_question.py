@@ -9,6 +9,7 @@ from google import genai
 from google.genai import types
 from google.genai import errors
 from pydantic import BaseModel
+from psycopg import sql
 
 load_dotenv()
 
@@ -42,6 +43,9 @@ sum/avg/count as a column name. Round money to 2 decimal places and percentages 
 using round(), so the result is directly readable. When a question asks for a
 superlative ("worst", "best", "top"), return the full ranked set rather than only the
 top row — the comparison is the answer.
+For columns whose allowed values are not listed above (product_name, brand, city,
+route), never filter with equality on a value you have not been shown. Use
+ILIKE '%substring%' instead, so a near-miss still matches.
 
 {VIEW_SCHEMA}
 """
@@ -65,6 +69,9 @@ Rules:
   see these rows, nothing else.
 - If the rows do not answer the question, say so plainly.
 - Two sentences at most. Plain language, no markdown.
+- If the result is empty or a zero count, do NOT assert that none exist. Say that the
+  query matched no rows, and quote the filter it used, so the reader can judge whether
+  the filter was the right one.
 """
 
 client = genai.Client(
@@ -74,12 +81,35 @@ client = genai.Client(
     ),
 )
 
-def get_sql(question: str) -> str:
+ENUM_COLUMNS = [
+    ("v_sales_margin", "category"),
+    ("v_sales_margin", "channel"),
+    ("v_delivery_performance", "region"),
+]
+
+
+def load_enums(conn: psycopg.Connection) -> str:
+    lines = []
+    with conn.cursor() as cur:
+        for view, col in ENUM_COLUMNS:
+            cur.execute(
+                sql.SQL("SELECT DISTINCT {} FROM {} ORDER BY 1").format(
+                    sql.Identifier(col), sql.Identifier(view)
+                )
+            )
+            values = [r[0] for r in cur.fetchall()]
+            if len(values) > 20:
+                continue          # too many values to be a fixed set — skip it
+            joined = ", ".join(str(v) for v in values)
+            lines.append(f"{view}.{col} is one of exactly: {joined}")
+    return "\n".join(lines)
+
+def get_sql(question: str, system_prompt: str) -> str:
     response = client.models.generate_content(
         model=MODEL_NAME,
         contents=question,
         config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
+            system_instruction=system_prompt,
             response_mime_type="application/json",
             response_schema=SQLAnswer,
         ),
@@ -126,23 +156,21 @@ def narrate(question: str, colnames: list[str], rows: list[tuple[Any, ...]]) -> 
 
 def main():
     question = sys.argv[1]
-    sql = get_sql(question)
-    validate_sql(sql)
 
     conn = psycopg.connect(os.environ["DATABASE_URL_LLM_PLAIN"])
-    with conn, conn.cursor() as cur:
-        # sql is dynamic (LLM- or fixture-sourced) text, not a compile-time literal, so
-        # psycopg's LiteralString-only overload can't accept it structurally. That
-        # overload guards against interpolating untrusted *values* into a query string;
-        # here the whole query is untrusted by design, and it's the llm_reader role plus
-        # validate_sql above that make running it safe, not this type.
-        cur.execute(cast(LiteralString, sql))
-        assert cur.description is not None
-        colnames = [desc.name for desc in cur.description]
-        rows = cur.fetchall()
+    with conn:
+        system_prompt = SYSTEM_PROMPT + "\n" + load_enums(conn)
+        query = get_sql(question, system_prompt)
+        validate_sql(query)
+
+        with conn.cursor() as cur:
+            cur.execute(cast(LiteralString, query))
+            assert cur.description is not None
+            colnames = [desc.name for desc in cur.description]
+            rows = cur.fetchall()
 
     narration = narrate(question, colnames, rows)
-    print(f"\nSQL: {sql}\n")
+    print(f"\nSQL: {query}\n")
     if narration:
         print(narration)
         print()
