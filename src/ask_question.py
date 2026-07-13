@@ -51,9 +51,11 @@ it, using only the views below. Never write more than one statement.
 
 Alias every output column with a descriptive snake_case name; never emit a bare
 sum/avg/count as a column name. Round money to 2 decimal places and percentages to 1,
-using round(), so the result is directly readable. When a question asks for a
-superlative ("worst", "best", "top"), return the full ranked set rather than only the
-top row — the comparison is the answer.
+using round(), so the result is directly readable. A percentage is the fraction
+multiplied by 100 — e.g. round(avg(bool_col::int) * 100, 1), never
+round(avg(bool_col::int), 1), which returns a fraction between 0 and 1, not a
+percentage. When a question asks for a superlative ("worst", "best", "top"), return the
+full ranked set rather than only the top row — the comparison is the answer.
 For columns whose allowed values are not listed above (product_name, brand, city,
 route), never filter with equality on a value you have not been shown. Use
 ILIKE '%substring%' instead, so a near-miss still matches.
@@ -119,6 +121,7 @@ def _gemini_structured(system_prompt: str, contents: str, schema: type[M]) -> M:
             system_instruction=system_prompt,
             response_mime_type="application/json",
             response_schema=schema,
+            temperature=0,
         ),
     )
     parsed = response.parsed
