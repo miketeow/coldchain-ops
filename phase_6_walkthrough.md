@@ -1424,6 +1424,7 @@ Python function and shadowing it invites confusion):
 
 ```python
 import os
+import time
 
 import psycopg
 from dotenv import load_dotenv
@@ -1437,8 +1438,9 @@ CASES = [
     {"question": "how many different kinds of orange products we have?", "expected": 2},
 ]
 
-RUNS_PER_CASE = 5      # each question is asked this many times, because the model varies
+RUNS_PER_CASE = 3      # each question is asked this many times, because the model varies
 TOLERANCE = 0.01
+REQUEST_PAUSE = 4      # seconds to wait between requests — see "Mind the rate limit" below
 
 
 def matches(got, expected) -> bool:
@@ -1471,6 +1473,8 @@ def main():
                 except Exception as e:
                     print(f"  ERROR: {e}")
 
+                time.sleep(REQUEST_PAUSE)   # don't burst — the free tier caps requests per minute
+
             print(f"{case_passed}/{RUNS_PER_CASE}  {question}")
 
     pct = 100 * total_passed / total_runs if total_runs else 0
@@ -1481,7 +1485,7 @@ if __name__ == "__main__":
     main()
 ```
 
-Two things worth reading closely:
+Three things worth reading closely:
 
 - **`autocommit=True` on the connection is not decoration — it's a correctness fix.**
   Normally psycopg runs your statements inside a transaction. The problem: if one run in
@@ -1493,8 +1497,54 @@ Two things worth reading closely:
   to commit anyway — autocommit costs you nothing here and saves you from a confusing
   cascade of fake failures.
 - **A failed run prints the wrong value *and* the SQL.** Same reasoning as Step 7: when a
-  case scores 3/5, you want to see the two queries that went wrong to understand *how* the
-  model drifted — was it a bad literal? a wrong column? — not just that it did.
+  case scores 2/3, you want to see the query that went wrong to understand *how* the model
+  drifted — was it a bad literal? a wrong column? — not just that it did.
+- **`time.sleep(REQUEST_PAUSE)` after every run is not politeness — it's what keeps the
+  eval from rate-limiting itself.** The next subsection explains why; the short version is
+  that firing every request back-to-back trips the free tier's per-minute cap.
+
+### Mind the rate limit — eval is a deliberate batch, not a continuous check
+
+There's a practical reality the free tier forces on you, and it's better to build it into
+how you think about eval than to fight it. Every run here is a real API request, and the
+free tier caps how many you can make — both per minute and per day (the exact numbers
+drift, so check them live at the dashboard the `429` error links to). Fire a burst of
+requests back-to-back and you'll trip the per-minute wall and get a
+`429 RESOURCE_EXHAUSTED`, with the server telling you to retry in ~30 seconds.
+
+That's why two constants in the script are set the way they are:
+
+- **`RUNS_PER_CASE = 3`, not 20.** Three runs is enough to see a *rate* — 0/3, 1/3, 2/3,
+  3/3. You don't need dozens; you need just enough to catch a question that's only
+  *sometimes* right. More runs mostly buys precision you don't need and requests you can't
+  spare.
+- **`REQUEST_PAUSE = 4` seconds between calls.** Eval isn't interactive — nobody is waiting
+  on it — so slowness is free. Spacing the calls a few seconds apart keeps you comfortably
+  under the per-minute cap instead of bursting past it. A 6-request eval then takes about
+  half a minute, which is nothing for something you run occasionally.
+
+But the deeper point is *cadence*. Eval is **not** something you run on every save. It's a
+deliberate ritual you run at specific moments — before a commit that changed the prompt,
+the model, or `load_enums` — to confirm you didn't regress. Run continuously it is both
+wasteful and (on a free tier) impossible; run deliberately, a few times a day, it is
+exactly right. Even with generous *paid* quota you'd design it this way, because burning
+API calls on every keystroke is silly no matter who's paying. The rate limit is just
+enforcing a discipline you'd want regardless.
+
+And be honest about the tradeoff you're standing in, because it's a good one to be able to
+articulate. This phase chose a free-tier model *on purpose*, so anyone who clones your repo
+can run it without a credit card. The price of "free and runnable by anyone" is "not much
+throughput." In a real deployment you'd have paid quota and run this eval in CI on every
+pull request — the *skill* is identical, only the cadence changes. Being able to say
+*"eval is request-hungry, so I run it as a pre-commit batch and would move it to CI with
+paid quota"* is exactly the kind of judgement the job is asking about.
+
+One caveat to know about the accuracy number when a limit is hit: a `429` is caught by the
+same `except Exception` as a genuinely wrong answer, so it counts as a **miss**. That means
+a rate-limit error slightly *understates* your true accuracy — a run that never got to ask
+the model isn't the model being wrong. For a rough measure that's fine, and it's why the
+eval keeps going instead of crashing when it hits the cap. If it ever bothers you, catch
+the API error separately from a wrong-value miss and report the two counts differently.
 
 ### Running it and reading the result
 
@@ -1505,13 +1555,13 @@ uv run python src/eval_pipeline.py
 You'll see something like:
 
 ```
-5/5  what's our total margin?
-5/5  how many different kinds of orange products we have?
+3/3  what's our total margin?
+3/3  how many different kinds of orange products we have?
 
-Overall: 10/10 correct = 100%
+Overall: 6/6 correct = 100%
 ```
 
-Two runs from now that might read `9/10 = 90%` instead, and **that is fine and expected**
+Two runs from now that might read `5/6 = 83%` instead, and **that is fine and expected**
 — it's the honest face of a non-deterministic system, not a bug you must chase to zero.
 What you've gained is enormous and easy to undersell: you can now say a real sentence about
 your pipeline — *"it answers this set of questions correctly ~95% of the time"* — and you
@@ -1778,6 +1828,439 @@ uv run python src/ask_question.py "nonsense that should produce no valid query"
 git add migrations/*_add_query_audit.sql src/ask_question.py
 git commit -m "feat: append-only audit log of every question, via an insert-only role"
 ```
+
+---
+
+## Step 17 — When the free tier runs dry: a local model for development
+
+By now the rate limit has stopped being a footnote and started being the thing that
+interrupts you. It bites hardest exactly where Step 15 warned it would: **during eval.**
+A single `uv run python src/eval_pipeline.py` fires `RUNS_PER_CASE × len(CASES)` requests
+in a tight loop — and each question is *two* calls (SQL, then narration) — so even a
+modest eval set bursts a dozen-plus requests through the free tier in under a minute.
+That trips the per-minute `429 RESOURCE_EXHAUSTED` wall, and a few eval runs in an
+afternoon can chew through the per-*day* cap entirely, at which point you're locked out
+until tomorrow. The `REQUEST_PAUSE` from Step 15 softens the per-minute burst, but it
+can't create daily quota out of nothing — and pausing 4 seconds between every call while
+you're actively iterating on `SYSTEM_PROMPT` turns a tight feedback loop into a slog.
+
+### Chapter 0: just wait it out
+
+The zeroth option is the one Step 15 already gave you: run eval deliberately, space the
+calls, treat it as a batch. That's the right discipline and you should keep it. But it
+solves *politeness*, not *scarcity*. When you're mid-change and want to run eval ten times
+in twenty minutes to see whether a prompt tweak helped, "wait 30 seconds" and "you're out
+for the day" are not pacing problems you can pace your way out of. Slower is not the same
+as unblocked.
+
+### The reframe: this task doesn't need the cloud to *develop* against
+
+Look honestly at what the model is being asked to do here. Write one schema-constrained
+`SELECT` over three views whose columns and enums you hand it explicitly, and later a
+two-sentence narration that may only quote numbers already in front of it. This is a
+narrow, bounded task — the whole reason Step 0 justified `flash-lite` over a frontier model
+in the first place. A task that narrow doesn't need a datacenter to *iterate* against. A
+small model running on your own machine has **no quota at all** — you can run eval fifty
+times in an afternoon and the only cost is a few seconds of your laptop's time.
+
+The one thing it is *not* is what you deploy. "It runs on my MacBook" doesn't ship. So the
+goal is precise: **keep Gemini as the deployed default, and add a local backend you flip on
+for the development loop.** Same code, same eval, same prompts — a different engine behind
+one function.
+
+### Why not just point the Gemini client at localhost
+
+The tempting shortcut — construct `genai.Client(...)` with a `base_url` aimed at your local
+server — doesn't work, and it's worth knowing why rather than discovering it at runtime.
+The `google-genai` SDK speaks Gemini's specific wire protocol. A local runner like Ollama
+speaks its own (and, separately, an OpenAI-compatible one). Pointing one client at the
+other's endpoint sends requests in a shape the server can't parse. The clean move isn't to
+trick the Gemini client — it's to swap in a different client behind a seam, so nothing
+*above* the seam can tell which one answered.
+
+### Choosing the model — `qwen2.5-coder:7b`
+
+Two constraints decide this: the task is **SQL generation**, and the machine is a **16 GB
+M1 Pro**. The binding one is the first — for text-to-SQL, whether the model was
+code/instruction-tuned matters more than raw size. `qwen2.5-coder:7b` is the strongest
+small open model for SQL right now; at 4-bit quantization it's about 4.7 GB on disk and in
+RAM, which leaves ~10 GB free so it isn't fighting Docker and Postgres for memory. (You
+already had `gemma3:4b` pulled from somewhere — it's fine for the easy narration call, but
+noticeably weaker at SQL, which is the call that actually matters. Don't split backends
+just to save a gigabyte; run one model for both.)
+
+```fish
+ollama pull qwen2.5-coder:7b     # ollama itself was already installed
+uv add ollama                    # the Python client
+```
+
+### The seam: one function, two engines, a validated object either way
+
+Here is the insight that makes this a small change instead of a rewrite. Both engines,
+despite different APIs, converge on the *same* end state: **a validated Pydantic object.**
+Gemini takes a `response_schema` and hands you `response.parsed`, already validated. Ollama
+takes a JSON-schema `format` and hands you JSON *text* that you validate yourself with
+`schema.model_validate_json(...)`. Different mechanics, identical result. So the seam is a
+function that takes `(system_prompt, contents, schema)` and returns a `schema` instance —
+and every caller (`get_sql`, `narrate`) stops caring which engine ran:
+
+```python
+LLM_BACKEND = os.environ.get("LLM_BACKEND", "gemini")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b")
+
+M = TypeVar("M", bound=BaseModel)
+
+
+def _gemini_structured(system_prompt: str, contents: str, schema: type[M]) -> M:
+    response = gemini_client().models.generate_content(
+        model=MODEL_NAME,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            response_mime_type="application/json",
+            response_schema=schema,
+        ),
+    )
+    parsed = response.parsed
+    if not isinstance(parsed, schema):
+        raise RuntimeError(f"model did not return the expected schema: {parsed!r}")
+    return parsed
+
+
+def _ollama_structured(system_prompt: str, contents: str, schema: type[M]) -> M:
+    response = ollama.chat(
+        model=OLLAMA_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": contents},
+        ],
+        format=schema.model_json_schema(),   # the Ollama equivalent of response_schema
+        options={"temperature": 0, "num_ctx": 8192},
+    )
+    content = response.message.content
+    if content is None:
+        raise RuntimeError("model returned an empty response")
+    return schema.model_validate_json(content)
+
+
+def generate_structured(system_prompt: str, contents: str, schema: type[M]) -> M:
+    if LLM_BACKEND == "ollama":
+        return _ollama_structured(system_prompt, contents, schema)
+    return _gemini_structured(system_prompt, contents, schema)
+```
+
+`get_sql` collapses to one line — `generate_structured(system_prompt, question, SQLAnswer).sql`
+— and `narrate` calls `generate_structured(..., Narration).answer`. Both original
+`generate_content` bodies disappear into the seam. That the same `SQLAnswer` / `Narration`
+classes from Steps 4 and 9 work *unchanged* against a completely different model is the
+whole payoff of having forced a structured shape back then: the schema is the contract, and
+the contract is engine-independent.
+
+### Three details that will bite if you skip them
+
+- **`num_ctx: 8192` is not optional for narration.** Ollama's default context window is
+  **2048 tokens**, and it silently truncates anything longer instead of erroring. Your
+  narrator prompt stuffs *every returned row* into the message; a wide result quietly pushes
+  the top of the prompt — the rules — out of the window, and the model misbehaves for a
+  reason you'll never see in a stack trace. Set the window wide enough that the whole prompt
+  survives.
+- **`temperature: 0` for the same reason Step 15 cared about determinism.** The free-tier
+  Gemini path left temperature at its default; locally you want 0, so the SQL is as
+  reproducible as a non-deterministic model gets and your eval measures the *prompt*, not
+  the sampler.
+- **The Gemini client had to become lazy.** Previously the module built
+  `genai.Client(api_key=os.environ["GEMINI_API_KEY"])` at import time. But the entire point
+  of the local backend is to develop *without* a live Gemini key — and reading
+  `os.environ["GEMINI_API_KEY"]` at import would `KeyError` before `LLM_BACKEND=ollama` ever
+  got a chance to matter. So construction moved behind `gemini_client()`, built on first use.
+  A backend you can turn off has to also turn off everything it demanded — the key included.
+
+### The graceful-degradation catch had to widen
+
+Step 11 made `narrate` fail *open*: if the narrator call dies, print the table anyway. It
+caught `errors.APIError` — a Gemini-shaped exception. Ollama fails in its own vocabulary:
+`ollama.ResponseError` for an API-level failure, and the builtin `ConnectionError` when the
+daemon isn't running at all. So the "unavailable" catch becomes a tuple spanning both
+engines, while a *malformed* response (the `RuntimeError` / Pydantic `ValidationError`) still
+propagates as the real bug it is — exactly the asymmetry Step 11 argued for, now stated once
+for two backends:
+
+```python
+LLM_UNAVAILABLE = (errors.APIError, ollama.ResponseError, ConnectionError)
+```
+
+### The eval payoff — the thing you came here for
+
+With a local backend, the per-request pause has nothing to pace, so the eval script drops
+it automatically:
+
+```python
+REQUEST_PAUSE = 0 if os.environ.get("LLM_BACKEND") == "ollama" else 4
+```
+
+Now `uv run python src/eval_pipeline.py` runs flat-out, as often as you like, and you can
+raise `RUNS_PER_CASE` past 3 to get a tighter accuracy estimate that the free tier could
+never have afforded. The rate limit that made eval a rationed ritual is simply gone from the
+inner loop.
+
+### Two honesty notes, so this doesn't mislead you
+
+- **Accuracy is per-backend; don't cross-compare.** The local model may score differently
+  from `flash-lite` on the same `CASES` — usually a little lower on the trickier SQL. A drop
+  when you switch engines is *not* a regression in your prompt. Eval numbers are only
+  comparable within one backend.
+- **The local eval is a fast proxy, not the final word.** What you deploy is Gemini, so
+  before you trust a prompt change *for production*, run the eval once against
+  `LLM_BACKEND=gemini` (spending a little of that scarce quota deliberately) to confirm the
+  change holds on the real engine. Develop against local for speed; ratify against Gemini
+  before you believe it.
+
+### Switching
+
+It's one environment variable. `.env` now carries:
+
+```
+LLM_BACKEND=ollama
+OLLAMA_MODEL=qwen2.5-coder:7b
+```
+
+Comment `LLM_BACKEND` out (or set it to `gemini`) to run against Gemini again. Deployment,
+which never sets the variable, gets the `"gemini"` default for free.
+
+### What I changed and ran for this step (you gave the go-ahead)
+
+Unlike Steps 1–16, which I wrote for you to type, here you explicitly asked me to make it
+work — so for this step I did edit and run:
+
+- Edited `src/ask_question.py`: added the `ollama` import and `LLM_BACKEND` / `OLLAMA_MODEL`
+  constants; made the Gemini client lazy behind `gemini_client()`; added
+  `generate_structured` and its two backend helpers; rewrote `get_sql` and `narrate` to go
+  through the seam; added the `LLM_UNAVAILABLE` tuple.
+- Edited `src/eval_pipeline.py`: made `REQUEST_PAUSE` backend-aware.
+- Ran `uv add ollama` (→ `ollama==0.6.2`, recorded in `pyproject.toml` / `uv.lock`) and
+  `ollama pull qwen2.5-coder:7b`.
+- Added the `LLM_BACKEND` / `OLLAMA_MODEL` lines to `.env` (gitignored, as always).
+- Verified end to end against the local model — see the verification note at the bottom.
+
+Nothing touched the database or the schema; the local switch is entirely application-side.
+
+---
+
+## Step 18 — Letting the audit trail earn its columns
+
+Step 16 built the audit log in one sitting, before you had ever *used* it. That's the right
+way to start — you can't design a log around questions you haven't asked yet — but it means
+the first schema is a guess. Now you've browsed it for real (Step 17's rate-limit debugging,
+the Ollama-vs-Gemini comparison), and the guess has visible seams. This step is the
+correction, and every change is driven by something the log actually failed to tell you —
+not by a checklist of "good audit practice." That distinction matters: **columns should earn
+their place by answering a question you really asked.**
+
+### The timestamp isn't wrong — you're reading it in the wrong timezone
+
+The first complaint is the loudest: the `asked_at` values don't match your clock. A row says
+`17:12`, it's `01:12 AM` where you sit. The instinct is to "store local time instead." That
+instinct is a trap, and resisting it is the single most important audit lesson in this step.
+
+`asked_at` is a `timestamptz`, which does **not** store a wall-clock reading. It stores an
+*absolute instant*, internally in UTC, and renders it in whatever timezone the viewer asks
+for. `17:12+00` and `01:12` Malaysia time are the **same instant** — the data was never
+wrong, only displayed in UTC. Storing local time instead would actively break the log:
+
+- **Ordering corrupts twice a year.** A bare `01:30` with no zone repeats on the
+  daylight-saving fall-back hour. An audit log you can't reliably order is not an audit log.
+- **"Local" stops meaning anything the moment there's a second server**, or a reader in
+  another country. UTC has exactly one meaning everywhere; that's the whole point of it.
+
+So the rule, which is the universal standard for logs: **store the absolute instant (UTC),
+convert to local only for display.** The storage stays `timestamptz`; the *display* is what
+we fix — and the browsing view below is where we do it.
+
+### `row_count` — a column that never earned its keep
+
+You noticed `row_count` never told you anything: some rows say 1, some say 5, and the number
+never once changed a decision. That's a correct read. Worse, it actively misled you in Step
+17 — the `array_agg` disaster showed `row_count = 1`, because the 2,928 bloated values were
+all inside a *single* row. A signal that reads "fine" during your worst result is not a
+signal worth keeping. It has exactly one narrow use — spotting a query that matched *nothing*
+— which isn't worth a permanent column here. We drop it. Keeping a column you never act on
+is how schemas rot.
+
+### `model` — the column Step 17 proved you needed
+
+Here's the change with the clearest evidence behind it. When you had one Ollama run and one
+Gemini run of the same question sitting next to each other in the log, you could only tell
+them apart by *reading the SQL and inferring which model wrote it.* That's exactly the
+question an audit log should answer directly. Recording which model produced each answer is
+standard practice in any system that runs more than one — and you now run two. A `model`
+column turns "squint at the SQL and guess" into a value you can filter and group by. (In a
+larger setup this grows into a little cluster — `model`, `temperature`, a prompt version,
+latency, token counts for cost — but `model` is the one carrying its weight today.)
+
+### `details` — a JSONB bag, and the discipline of *not* storing everything
+
+Your fourth instinct was the subtlest and the most correct: not every future capability will
+produce a `generated_sql`. A summarizer, a classifier, a chat turn — each returns a
+differently-shaped response. Hard-coding a typed column per capability doesn't scale. The
+mature answer is a **`jsonb` column** — call it `details` — that holds whatever
+capability-specific structure a given request produced, while the handful of things you
+*filter and sort on* (`question`, `model`, `asked_at`, `error`) stay as typed columns. JSONB
+future-proofs the log without giving up queryability; Postgres can index and query *into* it.
+
+But storing a flexible bag makes it tempting to dump *everything* in, and that's where audit
+design meets governance. Two disciplines to hold:
+
+- **Store the shape, not the payload.** We record `{"kind": "sql", "columns": [...]}` — the
+  *kind* of response and the *columns* it returned — but **not the result rows themselves.**
+  Rows can be huge (Step 17's 2,928-element array) and can carry sensitive data; an audit
+  table that quietly accumulates every value your users ever pulled becomes a liability, not
+  an asset. The `kind` discriminator is the future-proofing hinge: tomorrow's summarizer
+  writes `{"kind": "summary", ...}` into the same column, and old queries still work.
+- **Log enough to reconstruct, and no more.** That's the actual industry principle behind
+  "how much should an audit trail store" — not "log everything," not "log minimally," but
+  *log what you'd need to investigate later, minus what you can't justify retaining.* For
+  this project, `question + model + generated_sql + details + error` clears that bar.
+
+We keep `generated_sql` as its own typed column, not folded into `details`, because for
+*this* capability it's the single artifact you most want to read and grep — it's earned a
+typed home. `details` is for the variable rest.
+
+### The migration — evolve in place, don't rebuild
+
+The audit table already holds real history (including those `429` rows from Step 17 that
+document a genuine rate-limit event). You don't want to lose that, so this is an `ALTER`, not
+a drop-and-recreate:
+
+```fish
+make db-create name=evolve_query_audit
+```
+
+```sql
+-- +goose Up
+ALTER TABLE query_audit ADD COLUMN model text;
+ALTER TABLE query_audit ADD COLUMN details jsonb;
+ALTER TABLE query_audit DROP COLUMN row_count;
+
+CREATE VIEW v_query_audit AS
+SELECT asked_at AT TIME ZONE 'Asia/Kuala_Lumpur' AS asked_local,
+       model,
+       question,
+       left(generated_sql, 80) AS sql_preview,
+       error IS NOT NULL        AS failed
+FROM query_audit;
+
+-- +goose Down
+DROP VIEW v_query_audit;
+ALTER TABLE query_audit ADD COLUMN row_count integer;
+ALTER TABLE query_audit DROP COLUMN details;
+ALTER TABLE query_audit DROP COLUMN model;
+```
+
+The new columns are nullable, so every existing row simply gets `NULL` for `model` and
+`details` — the historical rows predate those facts, and a blank is the honest record of "we
+didn't capture this at the time." No backfill, no fabricated data.
+
+**What the view is, in one sentence:** a *saved query you can read like a table* — the exact
+same mechanism as Phase 4's `v_sales_margin`, pointed at the audit log. It stores no data of
+its own; it re-runs its `SELECT` each time. So `SELECT * FROM v_query_audit ORDER BY
+asked_local DESC LIMIT 10;` is now your compact, local-time, one-line-per-query browsing
+view, while the full-fidelity data stays in `query_audit` for the rare moment you need a
+complete error or the whole SQL. That's the same storage-vs-presentation split as the
+timestamp fix: keep everything raw underneath, read through a tidy window on top.
+
+(One honest tradeoff: the view hard-codes `'Asia/Kuala_Lumpur'`, which bakes a location into
+it. That's fine for a personal browsing convenience. The more portable alternative is to
+leave the view in UTC and put `SET timezone = 'Asia/Kuala_Lumpur';` in your `~/.psqlrc` so
+*every* session displays local time. Either is defensible; this picks the one that makes the
+view self-contained.)
+
+```fish
+make db-migrate
+make db-status
+```
+
+### Wiring it into the script
+
+`write_audit` loses `row_count` and gains `model` and `details`. The one non-obvious detail
+is the JSONB: **psycopg won't turn a plain `dict` into `jsonb` on its own** — you wrap it in
+`Jsonb(...)` so the driver knows the intent (and does it safely, as a parameter, never as
+string-built SQL):
+
+```python
+from psycopg.types.json import Jsonb
+
+
+def write_audit(
+    question: str,
+    model: str,
+    generated_sql: str | None,
+    details: dict[str, Any] | None,
+    error: str | None,
+) -> None:
+    with psycopg.connect(os.environ["DATABASE_URL_AUDIT_PLAIN"]) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO query_audit (question, model, generated_sql, details, error) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (question, model, generated_sql,
+             Jsonb(details) if details is not None else None, error),
+        )
+```
+
+The model to record comes from whichever backend is active, computed once near the top:
+
+```python
+ACTIVE_MODEL = OLLAMA_MODEL if LLM_BACKEND == "ollama" else MODEL_NAME
+```
+
+And the two call sites in `main()` — success records the shape in `details`, failure records
+the model it tried and no details:
+
+```python
+    except Exception as e:
+        write_audit(question, ACTIVE_MODEL, None, None, str(e))
+        raise
+
+    write_audit(question, ACTIVE_MODEL, query, {"kind": "sql", "columns": colnames}, None)
+```
+
+Note the ordering is *unchanged* from Step 16: the audit write still happens **before**
+`narrate`, so a flaky narrator can't stop the log from recording what the pipeline really
+did. That's also why `details` stores the columns and not the narration sentence — the
+narration doesn't exist yet at audit time, and deliberately so.
+
+### Verify
+
+Run one bounded question (a single-row scalar — don't re-run the collection query that
+flooded the terminal in Step 17), then read it back through the view:
+
+```fish
+env LLM_BACKEND=ollama uv run python src/ask_question.py "what's our total margin?"
+```
+```fish
+make psql
+```
+```sql
+SELECT * FROM v_query_audit ORDER BY asked_local DESC LIMIT 5;   -- compact, local time, model shown
+SELECT model, details FROM query_audit ORDER BY asked_at DESC LIMIT 1;  -- the JSONB bag
+```
+
+The newest row should show `model = qwen2.5-coder:7b`, an `asked_local` that matches your
+wall clock, and `details = {"kind": "sql", "columns": ["total_margin"]}`.
+
+### What I changed and ran for this step (you asked me to)
+
+As with Step 17, you asked me to implement this one rather than hand it to you:
+
+- New migration `migrations/20260711134832_evolve_query_audit.sql`: adds `model` and
+  `details`, drops `row_count`, creates `v_query_audit`. Applied it with `make db-migrate`.
+- `src/ask_question.py`: added the `Jsonb` import and `ACTIVE_MODEL`; changed `write_audit`'s
+  signature and INSERT; updated both call sites in `main()`.
+- Verified end to end: ran the scalar question on the local backend and confirmed the new row
+  carries the model, local-time display, and the `details` JSONB.
+
+The migration is reversible (`make db-rollback` runs the `Down`), which restores `row_count`
+and drops the two new columns and the view — though the dropped `row_count` history is gone
+for good, which is the point.
 
 ---
 
