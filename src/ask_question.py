@@ -1,8 +1,9 @@
 import os
 import re
 import sys
-from typing import Any, LiteralString, cast
+from typing import Any, LiteralString, TypeVar, cast
 
+import ollama
 import psycopg
 from dotenv import load_dotenv
 from google import genai
@@ -10,10 +11,20 @@ from google.genai import types
 from google.genai import errors
 from pydantic import BaseModel
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 load_dotenv()
 
 MODEL_NAME = "gemini-2.5-flash-lite"
+
+# Which LLM to talk to. "gemini" (the deployed default) or "ollama" (a local model,
+# for development when the Gemini free tier runs out — see the walkthrough).
+LLM_BACKEND = os.environ.get("LLM_BACKEND", "gemini")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b")
+
+# The concrete model behind the active backend — recorded in the audit log so runs from
+# different models are distinguishable after the fact (see the walkthrough).
+ACTIVE_MODEL = OLLAMA_MODEL if LLM_BACKEND == "ollama" else MODEL_NAME
 
 VIEW_SCHEMA = """
 You may only query these three views. Never reference any other table.
@@ -74,12 +85,70 @@ Rules:
   the filter was the right one.
 """
 
-client = genai.Client(
-    api_key=os.environ["GEMINI_API_KEY"],
-    http_options=types.HttpOptions(
-        retry_options=types.HttpRetryOptions(attempts=5),
-    ),
-)
+_gemini_client: genai.Client | None = None
+
+
+def gemini_client() -> genai.Client:
+    """Build the Gemini client on first use, not at import time — so a local
+    LLM_BACKEND=ollama run never needs GEMINI_API_KEY to be set at all."""
+    global _gemini_client
+    if _gemini_client is None:
+        _gemini_client = genai.Client(
+            api_key=os.environ["GEMINI_API_KEY"],
+            http_options=types.HttpOptions(
+                retry_options=types.HttpRetryOptions(attempts=5),
+            ),
+        )
+    return _gemini_client
+
+
+M = TypeVar("M", bound=BaseModel)
+
+# Errors that mean "the model is unreachable/overloaded right now", as opposed to
+# "the model returned something malformed" (a real bug that must still propagate).
+# Gemini raises errors.APIError; Ollama raises ResponseError for API failures and the
+# builtin ConnectionError when its daemon isn't running.
+LLM_UNAVAILABLE = (errors.APIError, ollama.ResponseError, ConnectionError)
+
+
+def _gemini_structured(system_prompt: str, contents: str, schema: type[M]) -> M:
+    response = gemini_client().models.generate_content(
+        model=MODEL_NAME,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            response_mime_type="application/json",
+            response_schema=schema,
+        ),
+    )
+    parsed = response.parsed
+    if not isinstance(parsed, schema):
+        raise RuntimeError(f"model did not return the expected schema: {parsed!r}")
+    return parsed
+
+
+def _ollama_structured(system_prompt: str, contents: str, schema: type[M]) -> M:
+    response = ollama.chat(
+        model=OLLAMA_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": contents},
+        ],
+        format=schema.model_json_schema(),   # force the JSON shape, same idea as response_schema
+        options={"temperature": 0, "num_ctx": 8192},
+    )
+    content = response.message.content
+    if content is None:
+        raise RuntimeError("model returned an empty response")
+    return schema.model_validate_json(content)
+
+
+def generate_structured(system_prompt: str, contents: str, schema: type[M]) -> M:
+    """One call that returns a validated Pydantic object, whichever backend is active.
+    Everything downstream is identical regardless of which model produced it."""
+    if LLM_BACKEND == "ollama":
+        return _ollama_structured(system_prompt, contents, schema)
+    return _gemini_structured(system_prompt, contents, schema)
 
 ENUM_COLUMNS = [
     ("v_sales_margin", "category"),
@@ -105,19 +174,7 @@ def load_enums(conn: psycopg.Connection) -> str:
     return "\n".join(lines)
 
 def get_sql(question: str, system_prompt: str) -> str:
-    response = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=question,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            response_mime_type="application/json",
-            response_schema=SQLAnswer,
-        ),
-    )
-    parsed = response.parsed
-    if not isinstance(parsed, SQLAnswer):
-        raise RuntimeError(f"Gemini did not return the expected schema: {parsed!r}")
-    return parsed.sql
+    return generate_structured(system_prompt, question, SQLAnswer).sql
 
 
 FORBIDDEN = re.compile(r"\b(insert|update|delete|drop|alter|grant|truncate)\b", re.I)
@@ -137,22 +194,14 @@ def narrate(question: str, colnames: list[str], rows: list[tuple[Any, ...]]) -> 
     table += "\n".join(" | ".join(str(v) for v in row) for row in rows)
 
     try:
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=f"Question: {question}\n\nQuery result:\n{table}",
-            config=types.GenerateContentConfig(
-                system_instruction=NARRATOR_PROMPT,
-                response_mime_type="application/json",
-                response_schema=Narration,
-            ),
-        )
-    except errors.APIError as e:
-        print(f"[narration unavailable: {e.code} {e.status}]", file=sys.stderr)
+        return generate_structured(
+            NARRATOR_PROMPT,
+            f"Question: {question}\n\nQuery result:\n{table}",
+            Narration,
+        ).answer
+    except LLM_UNAVAILABLE as e:
+        print(f"[narration unavailable: {e}]", file=sys.stderr)
         return None
-    parsed = response.parsed
-    if not isinstance(parsed, Narration):
-        raise RuntimeError(f"Gemini did not return the expected schema: {parsed!r}")
-    return parsed.answer
 
 def answer_question(
     conn: psycopg.Connection, question: str
@@ -167,13 +216,32 @@ def answer_question(
         rows = cur.fetchall()
     return query, colnames, rows
 
+def write_audit(
+    question: str,
+    model: str,
+    generated_sql: str | None,
+    details: dict[str, Any] | None,
+    error: str | None,
+) -> None:
+    with psycopg.connect(os.environ["DATABASE_URL_AUDIT_PLAIN"]) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO query_audit (question, model, generated_sql, details, error) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (question, model, generated_sql,
+             Jsonb(details) if details is not None else None, error),
+        )
+
 def main():
     question = sys.argv[1]
+    try:
+        conn = psycopg.connect(os.environ["DATABASE_URL_LLM_PLAIN"])
+        with conn:
+            query, colnames, rows = answer_question(conn, question)
+    except Exception as e:
+        write_audit(question, ACTIVE_MODEL, None, None, str(e))
+        raise
 
-    conn = psycopg.connect(os.environ["DATABASE_URL_LLM_PLAIN"])
-    with conn:
-        query, colnames, rows = answer_question(conn, question)
-
+    write_audit(question, ACTIVE_MODEL, query, {"kind": "sql", "columns": colnames}, None)
     narration = narrate(question, colnames, rows)
     print(f"\nSQL: {query}\n")
     if narration:
