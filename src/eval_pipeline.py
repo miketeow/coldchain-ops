@@ -15,7 +15,9 @@ CASES = [
 
 RUNS_PER_CASE = 3      # each question is asked this many times, because the model varies
 TOLERANCE = 0.01
-REQUEST_PAUSE = 4      # seconds to wait between requests — see "Mind the rate limit" below
+# Seconds to wait between requests — see "Mind the rate limit" below. A local model
+# has no per-minute cap, so there's nothing to space out; only the free Gemini tier needs it.
+REQUEST_PAUSE = 0 if os.environ.get("LLM_BACKEND") == "ollama" else 4
 
 
 def matches(got, expected) -> bool:
