@@ -82,15 +82,26 @@ psql "postgres://ops:ops@localhost:5433/coldchain?sslmode=disable" -c "\dt"
   the source of truth, not their output.
 
 ## Current schema (verified, do not re-derive — confirm against the DB if unsure)
-4 dimensions, 4 facts (classic star):
+4 dimensions, 4 facts (classic star), plus an embedding column and an append-only audit
+table layered on top by later phases:
 - `suppliers`(supplier_id, supplier_name, country)
-- `products`(product_id, product_name, category, brand, supplier_id→suppliers, unit, shelf_life_days, default_unit_cost, default_unit_price)
+- `products`(product_id, product_name, category, brand, supplier_id→suppliers, unit, shelf_life_days, default_unit_cost, default_unit_price, embedding vector(384))
 - `customers`(customer_id, customer_name, channel, region, city)
 - `dates`(date PK, year, quarter, month, month_name, week, day_of_week, day_name, is_weekend)
 - `orders`(order_id, customer_id→customers, order_date→dates, source, status)
 - `order_lines`(order_id→orders, product_id→products, qty_cartons, unit_price, unit_cost) — grain: one row per product per order
 - `deliveries`(order_id→orders, route, dispatched_at, planned_eta, delivered_at, temp_excursion)
 - `storage_costs`(cost_date→dates, product_id→products, pallets_stored, cost_per_pallet_day)
+- `query_audit`(id, asked_at, question, generated_sql, error, model, details jsonb) —
+  append-only log of every NL question asked via `src/ask_question.py`; the `auditor`
+  role can `INSERT` only, never `SELECT`/`UPDATE`/`DELETE`. `v_query_audit` is a
+  local-time browsing view over it.
 
 All surrogate keys are `BIGINT … IDENTITY` — Postgres assigns them. The load pattern is
 therefore: insert a dimension, read the generated IDs back, then reference them in facts.
+
+Analytics views (`v_sales_margin`, `v_delivery_performance`, `v_storage_cost`, Phase 4)
+are the only tables the NL→SQL layer (Phase 6) is allowed to query — it runs as
+`llm_reader`, a role with `SELECT` on those three views and nothing else. That role
+boundary, not prompt-level trust, is the safety mechanism; see
+`walkthroughs/phase_6_walkthrough.md` for why.

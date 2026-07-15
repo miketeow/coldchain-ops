@@ -59,9 +59,39 @@ I tell you a phase is done, update the box here (only when I say so).
         literally in the data. Query `"red grapes"` ranks Red Grapes first (0.2837),
         clearly separated from the next-closest (0.52) — confirms both semantic recall
         (no lexical overlap needed) and exact-phrase precision.
-- [ ] **Phase 6 — WhatsApp → structured order (LLM extraction)**, reusing Phase 5's
-      embed-and-compare mechanism to fuzzy-match free-text product mentions to real
-      `product_id`s. ← NEXT
+- [x] **Phase 6 — Ask a business question in English, get it answered by SQL.** VERIFIED:
+      - `src/ask_question.py`: LLM turns a free-text question into ONE validated
+        read-only `SELECT` against the three Phase 4 views only, run as a dedicated
+        `llm_reader` role (`SELECT` on the views alone — the safety mechanism is the
+        role's privileges, not prompt-level trust) — then a second, narration-only LLM
+        call turns the raw rows into a two-sentence answer that may only quote figures
+        actually present in the rows.
+      - Guards added as real failures surfaced, not pre-emptively: structured-output
+        schemas (`SQLAnswer`/`Narration` Pydantic models) instead of parsing prose;
+        `validate_sql` blocks multi-statement and non-`SELECT`/mutating SQL; retry +
+        graceful degradation (`LLM_UNAVAILABLE`) for a flaky upstream so a narration
+        failure still prints the raw rows instead of crashing; `load_enums` reads real
+        `category`/`channel`/`region` values from the DB into the prompt so the model
+        can't guess a filter value that doesn't exist (e.g. `'Orange'` vs the real
+        `Citrus`); the narrator is shown the executed SQL so it can honestly say "no
+        rows matched this filter" instead of asserting none exist.
+      - `query_audit` table (append-only; `auditor` role has `INSERT` only, no
+        `SELECT`/`UPDATE`/`DELETE`) logs every question, the model that answered it,
+        the generated SQL, a `details` jsonb bag, and any error — evolved from an
+        initial `row_count` column (dropped, never used) to `model` + `details` once
+        Step 17 made "which backend answered this" worth knowing. `v_query_audit` is a
+        local-time browsing view over it.
+      - `LLM_BACKEND=ollama` (`qwen2.5-coder:7b` via local Ollama) is a swappable
+        second engine behind the same `generate_structured` seam, added so development
+        doesn't stall on the Gemini free tier's rate limit — Gemini
+        (`gemini-2.5-flash-lite`) stays the default/deployed engine.
+      - `src/eval_pipeline.py`: a fixed set of question → known-answer cases, each run
+        `RUNS_PER_CASE` times (the model isn't deterministic even at `temperature=0`
+        across backends) with a pause between calls to respect the free-tier rate
+        limit. Caught a real gap: Gemini was still sampling (temperature unset) and
+        "percentage" was underspecified in the prompt (fraction vs ×100) — fixed by
+        pinning `temperature=0` on both backends and adding an explicit percentage
+        rule; full 10-case suite now passing.
 
 ## Key carried-forward facts for Phase 3
 - The xlsx's `order_id` is an **in-memory link only**, NOT the database's IDENTITY id.
