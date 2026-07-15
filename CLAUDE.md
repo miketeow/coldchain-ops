@@ -12,8 +12,8 @@ no BI/dashboard phase — see PROGRESS.md for why that was cut.
 Read before doing anything:
 - `PROGRESS.md` — current status, phase checklist, and the reasoning behind the pivot
   away from the original job-specific plan. Check this first.
-- `phase_3_walkthrough.md` / `phase_4_walkthrough.md` — worked docs for the phases done
-  so far; the *style* to match for any new walkthrough.
+- `walkthroughs/` — the worked phase-by-phase docs (`phase_1_walkthrough.md` …
+  `phase_6_walkthrough.md`); the *style* to match for any new walkthrough.
 
 ## THE MOST IMPORTANT RULE: this is a learning project, not a build-it-for-me project
 
@@ -23,7 +23,7 @@ finished MVP you generated and ran would be worthless to me.
 
 Concretely:
 - **Default to producing detailed, phase-by-phase walkthroughs** that I follow and type
-  out myself. Match the style of `phase_1_schema_walkthrough`: every step worked,
+  out myself. Match the style of `walkthroughs/phase_1_walkthrough.md`: every step worked,
   reasoning inline, no skipped pieces.
 - **Do NOT write whole implementation files and run them to "complete" a phase.** Do not
   scaffold an entire phase's scripts and execute them end to end. Do not "just get it
