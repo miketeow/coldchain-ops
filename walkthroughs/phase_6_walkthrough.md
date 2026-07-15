@@ -1048,7 +1048,7 @@ into a query that you are building yourself. Those are called identifiers, and
 `psycopg.sql.Identifier` quotes them correctly for you.
 
 You might reasonably object: didn't we already give up on this in `main()`, where the
-comment explains that `cast(LiteralString, sql)` is fine? No — and the difference is worth
+comment explains that `cast(LiteralString, query)` is fine? No — and the difference is worth
 being precise about. In `main()`, the *entire query text* comes from the language model. We
 cannot sanitise our way to safety there, so we do something stronger: we run it as a
 database role that is physically incapable of doing damage. The role is the protection, and
@@ -1073,7 +1073,9 @@ and pasting them into the prompt text before the request is sent. The model neve
 between what the prompt *claims* the columns contain and what they *actually* contain.
 
 **Where the code goes.** All of it lives in `src/ask_question.py` at module level: the
-`from psycopg import sql` import at the top with the others, `ENUM_COLUMNS` next to your
+`from psycopg import sql` import at the top with the others (add `cast` and `LiteralString`
+to your `from typing import …` line too — that's what makes `cur.execute(cast(LiteralString,
+query))` type-check, since the query text is a runtime string), `ENUM_COLUMNS` next to your
 other constants, and `load_enums` as a top-level function alongside `get_sql` and
 `validate_sql`. There is no separate script and no separate command to run — `load_enums`
 is *called from inside `main()`*, once per invocation, right before `get_sql`.
@@ -1098,7 +1100,7 @@ def main():
 
         # 3. reuse the SAME connection to run the model's SQL
         with conn.cursor() as cur:
-            cur.execute(query)
+            cur.execute(cast(LiteralString, query))
             colnames = [desc.name for desc in cur.description]
             rows = cur.fetchall()
 
@@ -1184,7 +1186,7 @@ From inside `narrate`, both look identical: one row, containing zero. The narrat
 *fail* to add a caveat — it lacked the information required to know a caveat was warranted.
 We never gave it the filter.
 
-So pass `sql` in as a third argument, and add a rule to `NARRATOR_PROMPT`:
+So pass `query` in as a third argument, and add a rule to `NARRATOR_PROMPT`:
 
 ```
 - If the result is empty or a zero count, do NOT assert that none exist. Say that the
@@ -1327,13 +1329,13 @@ def answer_question(
     conn: psycopg.Connection, question: str
 ) -> tuple[str, list[str], list[tuple]]:
     system_prompt = SYSTEM_PROMPT + "\n" + load_enums(conn)
-    sql = get_sql(question, system_prompt)
-    validate_sql(sql)
+    query = get_sql(question, system_prompt)
+    validate_sql(query)
     with conn.cursor() as cur:
-        cur.execute(sql)
+        cur.execute(cast(LiteralString, query))
         colnames = [desc.name for desc in cur.description]
         rows = cur.fetchall()
-    return sql, colnames, rows
+    return query, colnames, rows
 ```
 
 (If your `get_sql` currently reads the module-level `SYSTEM_PROMPT` directly instead of
@@ -1348,10 +1350,10 @@ def main():
     question = sys.argv[1]
     conn = psycopg.connect(os.environ["DATABASE_URL_LLM_PLAIN"])
     with conn:
-        sql, colnames, rows = answer_question(conn, question)
-    narration = narrate(question, colnames, rows, sql)
+        query, colnames, rows = answer_question(conn, question)
+    narration = narrate(question, colnames, rows, query)
 
-    print(f"\nSQL: {sql}\n")
+    print(f"\nSQL: {query}\n")
     if narration:
         print(narration)
         print()
@@ -1469,7 +1471,7 @@ def main():
                         total_passed += 1
                     else:
                         print(f"  WRONG: got {got!r}, expected {expected!r}")
-                        print(f"         sql: {sql}")
+                    print(f"         sql: {sql}")
                 except Exception as e:
                     print(f"  ERROR: {e}")
 
@@ -1496,9 +1498,9 @@ Three things worth reading closely:
   stays contained to that one run. These are all read-only `SELECT`s, so there's nothing
   to commit anyway — autocommit costs you nothing here and saves you from a confusing
   cascade of fake failures.
-- **A failed run prints the wrong value *and* the SQL.** Same reasoning as Step 7: when a
-  case scores 2/3, you want to see the query that went wrong to understand *how* the model
-  drifted — was it a bad literal? a wrong column? — not just that it did.
+- **Every run prints its SQL, and a failed run also prints the wrong value.** Same reasoning
+  as Step 7: when a case scores 2/3, you want to see the query that went wrong to understand
+  *how* the model drifted — was it a bad literal? a wrong column? — not just that it did.
 - **`time.sleep(REQUEST_PAUSE)` after every run is not politeness — it's what keeps the
   eval from rate-limiting itself.** The next subsection explains why; the short version is
   that firing every request back-to-back trips the free tier's per-minute cap.
@@ -1762,16 +1764,16 @@ def main():
     try:
         conn = psycopg.connect(os.environ["DATABASE_URL_LLM_PLAIN"])
         with conn:
-            sql, colnames, rows = answer_question(conn, question)
+            query, colnames, rows = answer_question(conn, question)
     except Exception as e:
         write_audit(question, None, None, str(e))
         raise
 
-    write_audit(question, sql, len(rows), None)
+    write_audit(question, query, len(rows), None)
 
-    narration = narrate(question, colnames, rows, sql)
+    narration = narrate(question, colnames, rows, query)
 
-    print(f"\nSQL: {sql}\n")
+    print(f"\nSQL: {query}\n")
     if narration:
         print(narration)
         print()
@@ -1987,6 +1989,17 @@ for two backends:
 
 ```python
 LLM_UNAVAILABLE = (errors.APIError, ollama.ResponseError, ConnectionError)
+```
+
+Concretely, `narrate`'s handler changes from Step 11's `except errors.APIError as e` to
+`except LLM_UNAVAILABLE as e`, and the printed message simplifies to `{e}`: a bare
+`ConnectionError` has no `.code`/`.status`, so Step 11's Gemini-specific
+`{e.code} {e.status}` no longer fits.
+
+```python
+    except LLM_UNAVAILABLE as e:
+        print(f"[narration unavailable: {e}]", file=sys.stderr)
+        return None
 ```
 
 ### The eval payoff — the thing you came here for
@@ -2261,6 +2274,91 @@ As with Step 17, you asked me to implement this one rather than hand it to you:
 The migration is reversible (`make db-rollback` runs the `Down`), which restores `row_count`
 and drops the two new columns and the view — though the dropped `row_count` history is gone
 for good, which is the point.
+
+---
+
+## Step 19 — Closing an eval gap: pin Gemini's temperature and teach the percentage rule
+
+Steps 15 and 17 built you a repeatable eval and a fast local loop to run it in. The point
+of that machinery was to *catch something*, and eventually it did. Run the eval enough
+times against the Gemini backend and one case — a percentage question — flips between right
+and wrong from run to run, and on the bad runs returns a bare fraction like `0.66` where the
+answer should be `66.1`. Two distinct causes hide behind that one symptom, and the eval is
+what surfaced both.
+
+### Cause 1 — Gemini was still sampling
+
+Recall the honest admission in Step 17: locally you pinned Ollama to `temperature: 0`, but
+"the free-tier Gemini path left temperature at its default." That was fine until the eval
+started *measuring* run-to-run variance — a question that scores 2/3 is usually not a prompt
+problem, it's the sampler picking a different (worse) query on the off run. Determinism is
+what makes the eval number mean something (Step 15's whole argument), so hold Gemini to the
+same standard as Ollama:
+
+```python
+def _gemini_structured(system_prompt: str, contents: str, schema: type[M]) -> M:
+    response = gemini_client().models.generate_content(
+        model=MODEL_NAME,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            response_mime_type="application/json",
+            response_schema=schema,
+            temperature=0,
+        ),
+    )
+    ...
+```
+
+One line. Now both backends are pinned, and an eval score reflects the *prompt*, not which
+way the dice fell.
+
+### Cause 2 — "percentage" was underspecified in the prompt
+
+Temperature explains the *flapping*; it doesn't explain why the wrong version was wrong. Read
+the bad SQL and it writes `round(avg(on_time::int), 1)` — which returns `0.7`, a fraction —
+instead of `round(avg(on_time::int) * 100, 1)`, which returns `66.1`. The prompt said "round
+percentages to 1," and the model dutifully rounded a *fraction* to one place. It obeyed the
+letter of an instruction that never defined what a percentage *is*. This is the same species
+of bug as Step 13's `'Orange'`: the model did something reasonable given underspecified
+guidance, and the fix is to remove the ambiguity, not to scold the model.
+
+Add one clarifying sentence to `SYSTEM_PROMPT`, right after the existing rounding rule and
+before the superlative rule:
+
+```
+Round money to 2 decimal places and percentages to 1, using round(), so the result is
+directly readable. A percentage is the fraction multiplied by 100 — e.g.
+round(avg(bool_col::int) * 100, 1), never round(avg(bool_col::int), 1), which returns a
+fraction between 0 and 1, not a percentage. When a question asks for a superlative ...
+```
+
+### Confirm the gap actually closed
+
+This is the part that makes the two changes *earn* their place rather than be plausible
+guesses: re-run the eval and watch the percentage case go from flapping to solid. Put the
+case in `CASES` first if it isn't there, so the regression can never silently return:
+
+```python
+{"question": "what percentage of our deliveries arrive on time?", "expected": 66.1},
+```
+
+Run it against Gemini — the deployed engine, so this is the "ratify against Gemini" discipline
+from Step 17, not just the fast local proxy:
+
+```fish
+uv run python src/eval_pipeline.py
+```
+
+You want that case at 3/3 now, where before it was 1/3 or 2/3. That swing — measured, not
+eyeballed — is the whole reason Steps 15 and 17 existed.
+
+### Commit
+
+```fish
+git add src/ask_question.py
+git commit -m "fix(llm): pin temperature to 0 and teach percentage math to close an eval gap"
+```
 
 ---
 

@@ -192,14 +192,14 @@ def validate_sql(sql: str) -> None:
     if FORBIDDEN.search(sql):
         raise ValueError(f"query contains a disallowed keyword: {sql}")
 
-def narrate(question: str, colnames: list[str], rows: list[tuple[Any, ...]]) -> str | None:
+def narrate(question: str, colnames: list[str], rows: list[tuple[Any, ...]], query: str) -> str | None:
     table = " | ".join(colnames) + "\n"
     table += "\n".join(" | ".join(str(v) for v in row) for row in rows)
 
     try:
         return generate_structured(
             NARRATOR_PROMPT,
-            f"Question: {question}\n\nQuery result:\n{table}",
+            f"Question: {question}\n\nSQL: {query}\n\nQuery result:\n{table}",
             Narration,
         ).answer
     except LLM_UNAVAILABLE as e:
@@ -245,7 +245,7 @@ def main():
         raise
 
     write_audit(question, ACTIVE_MODEL, query, {"kind": "sql", "columns": colnames}, None)
-    narration = narrate(question, colnames, rows)
+    narration = narrate(question, colnames, rows, query)
     print(f"\nSQL: {query}\n")
     if narration:
         print(narration)

@@ -9,24 +9,16 @@ from ask_question import answer_question
 load_dotenv()
 
 CASES = [
-    # {"question": "what's our total margin?", "expected": 6031937.59},
-    # {"question": "how many different kinds of orange products we have?", "expected": 2},
-    # # SELECT round(sum(revenue),2) FROM v_sales_margin WHERE channel = 'Wholesale';
-    # {"question": "what's our total revenue from Wholesale orders?", "expected": 2055518.64},
-    # SELECT round(sum(margin),2) FROM v_sales_margin WHERE region = 'South';
-    # {"question": "what's our total margin in the South region?", "expected": 276961.75},
-    # SELECT round(100.0 * count(*) FILTER (WHERE on_time) / count(*), 1) FROM v_delivery_performance;
+    {"question": "what's our total margin?", "expected": 6031937.59},
+    {"question": "how many different kinds of orange products we have?", "expected": 2},
+    {"question": "what's our total revenue from Wholesale orders?", "expected": 2055518.64},
+    {"question": "what's our total margin in the South region?", "expected": 276961.75},
     {"question": "what percentage of our deliveries arrive on time?", "expected": 66.1},
-    # # SELECT count(*) FROM v_delivery_performance WHERE temp_excursion = true;
-    # {"question": "how many deliveries had a temperature excursion?", "expected": 289},
-    # # SELECT round(avg(delay_hours),2) FROM v_delivery_performance WHERE region = 'Central';
-    # {"question": "what's the average delivery delay in hours for the Central region?", "expected": 1.79},
-    # # SELECT round(sum(daily_cost),2) FROM v_storage_cost;
-    # {"question": "what's our total storage cost to date?", "expected": 298337.40},
-    # # SELECT count(DISTINCT product_name) FROM v_sales_margin WHERE channel = 'Ecommerce';
-    # {"question": "how many distinct products have we sold through the Ecommerce channel?", "expected": 8},
-    # # SELECT sum(qty_cartons) FROM v_sales_margin;
-    # {"question": "how many total cartons have we sold?", "expected": 388305},
+    {"question": "how many deliveries had a temperature excursion?", "expected": 289},
+    {"question": "what's the average delivery delay in hours for the Central region?", "expected": 1.79},
+    {"question": "what's our total storage cost to date?", "expected": 298337.40},
+    {"question": "how many distinct products have we sold through the Ecommerce channel?", "expected": 8},
+    {"question": "how many total cartons have we sold?", "expected": 388305},
 ]
 
 RUNS_PER_CASE = 3      # each question is asked this many times, because the model varies
