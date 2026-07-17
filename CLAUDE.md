@@ -2,12 +2,10 @@
 
 ## What this project is
 A synthetic fresh-fruit cold-chain distribution platform, built as a general-purpose
-AI/data-engineering portfolio piece (not tied to one specific job posting — see
-PROGRESS.md history). It deliberately mirrors a real fruit importer's business: imported
+AI/data-engineering portfolio piece. It deliberately mirrors a real fruit importer's business: imported
 fruit, cold storage, supermarket deliveries, WhatsApp orders, and a messy
 accounting-system Excel export. The arc is: model it (schema) → populate it (synthetic
-data) → clean it (ETL) → layer intelligence on it (pgvector/LLM). There is deliberately
-no BI/dashboard phase — see PROGRESS.md for why that was cut.
+data) → clean it (ETL) → layer intelligence on it (pgvector/LLM). 
 
 Read before doing anything:
 - `PROGRESS.md` — current status, phase checklist, and the reasoning behind the pivot
